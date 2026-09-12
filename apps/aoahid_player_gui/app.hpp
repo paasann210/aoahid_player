@@ -89,19 +89,18 @@ class App {
         std::vector<aoap::AdbDevice> devices;
         std::string error;
     };
-    // The adb pre-flight run before every connect: start the server so `wm
-    // size` answers, read the screen size, then stop it again so the AOA
-    // handshake gets the USB interface. `skipped` means a recording was in
-    // progress, so adb was left untouched entirely.
-    struct ConnectPrep {
-        bool skipped{};
+    // The one-time adb pre-flight run at startup: start the server so `wm
+    // size` answers, read the screen size, then stop it again and give the
+    // OS a moment before the initial device scan.
+    struct StartupPrep {
         AdbStatus status{AdbStatus::unknown};
         bool size_ok{};
         int32_t width{};
         int32_t height{};
         std::string size_error;
     };
-    // The Devices card's refresh button: adb kill-server, before a rescan.
+    // The Devices card's refresh button: adb kill-server, then a rescan.
+    // `skipped` means a recording was in progress, so adb was left untouched.
     struct RetryPrep {
         bool skipped{};
         AdbStatus status{AdbStatus::unknown};
@@ -150,11 +149,9 @@ class App {
     void refresh_scripts();
     void load_script(const std::string& path);
     void delete_script(const std::string& path);
-    // The Connect button: runs the adb pre-flight, then rescans USB devices,
-    // then calls connect() once that rescan lands back on Phase::idle.
-    void begin_connect();
-    // The actual AOA handshake, using the current device selection; called
-    // once begin_connect()'s rescan has finished.
+    // The Connect button: the AOA handshake on the current device selection.
+    // Touches neither adb nor the device list; both are kept current by the
+    // startup pre-flight and the Devices card's refresh button.
     void connect();
     // The Devices card's refresh button: adb kill-server, then a rescan. No
     // adb start-server, no screen size, and no handshake — just a cheap way
@@ -210,9 +207,6 @@ class App {
     std::string connect_error_;
     float connect_height_{120.0f};
     Engine::Phase last_phase_{Engine::Phase::idle};
-    // True from the moment engine_.refresh() is kicked off by begin_connect()
-    // until the rescan lands back on Phase::idle and connect() runs.
-    bool awaiting_connect_rescan_{};
     AdbStatus adb_status_{AdbStatus::unknown};
 
     // Profile settings; frozen while connected.
@@ -341,7 +335,7 @@ class App {
     uint64_t last_record_rows_{};
 
     // Short adb tasks.
-    std::future<ConnectPrep> connect_prep_task_;
+    std::future<StartupPrep> startup_prep_task_;
     std::future<RetryPrep> retry_task_;
     std::future<AdbList> adb_task_;
 

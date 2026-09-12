@@ -45,27 +45,29 @@ Start `aoahid_player_gui`. The profile settings are saved to
 and restored at the next start; delete the file to go back to the defaults.
 If the folder is read-only, changes last until the app closes.
 
+On startup, before the first device scan, the app starts the adb server,
+reads the touchscreen resolution with `adb shell wm size`, and stops the
+server again (it can otherwise hold the phone's USB interface and block the
+accessory handshake) — all once, so Connect itself never has to wait on adb.
 An *adb* status pill next to the connection status (top right) shows whether
-the adb server is running, stopped, not found, or not yet known; Connect and
-Retry are what move it between those states, and each change is logged.
+the server is running, stopped, not found, or not yet known, and each change
+is logged.
 
 **Left side — connection**
 
 1. *Devices* lists AOA-capable phones; the refresh button stops the adb
-   server (it can otherwise hold the phone's USB interface) and searches
-   again, without touching the screen size or connecting on its own — press
-   Connect once the phone reappears. Tick one or more (a single phone is
-   ticked for you).
+   server (in case something else started it since) and searches again,
+   without touching the screen size or connecting on its own — press Connect
+   once the phone reappears. Tick one or more (a single phone is ticked for
+   you).
 2. *Profiles* chooses which HID devices to present: touchscreen, mouse,
    keyboard, gamepad, pen. Each one's settings open when it is switched on.
-   The touchscreen resolution is read automatically as part of Connect (an
-   override size wins, because that is what touches map to); type into the
-   width/height fields to set it by hand instead.
-3. *Connect* starts the adb server, reads the screen size with
-   `adb shell wm size`, stops the adb server again (it can otherwise hold the
-   phone's USB interface and block the accessory handshake), rescans for USB
-   devices, then connects — all in one step. A recording in progress keeps
-   the adb server running and skips straight to the rescan and connect.
+   The touchscreen resolution comes from the startup adb read described above
+   (an override size wins, because that is what touches map to); type into
+   the width/height fields to set it by hand instead.
+3. *Connect* starts the AOA handshake on the ticked devices right away —
+   it does not touch adb or rescan, so it stays fast how ever many devices
+   are ticked.
 
 While connected, the profile choices are locked; disconnect to change them.
 Each connected phone shows a status dot and its report count, and a phone

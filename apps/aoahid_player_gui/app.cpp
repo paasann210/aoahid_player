@@ -45,7 +45,32 @@ App::App(std::function<void()> wake)
         load_script(scripts_.front().path);
     log_.message(aoap::Severity::info,
                  "Scripts folder: " + aoap::script_directory() + ". Searching for devices...");
-    engine_.refresh();
+
+    // One-time adb pre-flight: read the screen size while the server is up,
+    // then stop it so it does not hold the phone's USB interface during the
+    // scan below, or later during Connect's own AOA handshake.
+    startup_prep_task_ =
+        std::async(std::launch::async, [serial = adb_serial(), wake = wake_] {
+            StartupPrep result;
+            std::string error;
+            if (aoap::adb_start_server(error))
+                result.status = AdbStatus::running;
+            else
+                result.status =
+                    aoap::adb_missing(error) ? AdbStatus::not_found : AdbStatus::unknown;
+            result.size_ok =
+                aoap::adb_screen_size(serial, result.width, result.height, result.size_error);
+            std::string stop_error;
+            if (aoap::adb_kill_server(stop_error)) {
+                if (result.status != AdbStatus::not_found)
+                    result.status = AdbStatus::stopped;
+            } else if (aoap::adb_missing(stop_error)) {
+                result.status = AdbStatus::not_found;
+            }
+            aoap::Timing::sleep_ms(1000);
+            wake();
+            return result;
+        });
 }
 
 App::~App() {
@@ -62,7 +87,7 @@ bool App::settings_locked() const { return engine_.phase() != Phase::idle; }
 
 bool App::animating() const {
     const Phase phase = engine_.phase();
-    if (engine_.busy() || recording() || connect_prep_task_.valid() || retry_task_.valid() ||
+    if (engine_.busy() || recording() || startup_prep_task_.valid() || retry_task_.valid() ||
         adb_task_.valid())
         return true;
     if (phase == Phase::playing)
@@ -172,29 +197,22 @@ void App::poll() {
             cursor_ = {};
         if (phase == Phase::connected && last_phase_ == Phase::connecting)
             connect_error_.clear();
-        if (phase == Phase::idle && last_phase_ == Phase::refreshing && awaiting_connect_rescan_) {
-            awaiting_connect_rescan_ = false;
-            connect();
-        }
         last_phase_ = phase;
     }
 
-    if (ready(connect_prep_task_)) {
-        const ConnectPrep result = connect_prep_task_.get();
-        if (!result.skipped) {
-            set_adb_status(result.status);
-            if (result.size_ok) {
-                touch_width_ = result.width;
-                touch_height_ = result.height;
-                log_.message(aoap::Severity::info, "Screen size from adb: " +
-                                                       std::to_string(result.width) + " x " +
-                                                       std::to_string(result.height) + ".");
-            } else {
-                log_.message(aoap::Severity::warning,
-                             "Screen size not detected. " + result.size_error);
-            }
+    if (ready(startup_prep_task_)) {
+        const StartupPrep result = startup_prep_task_.get();
+        set_adb_status(result.status);
+        if (result.size_ok) {
+            touch_width_ = result.width;
+            touch_height_ = result.height;
+            log_.message(aoap::Severity::info, "Screen size from adb: " +
+                                                   std::to_string(result.width) + " x " +
+                                                   std::to_string(result.height) + ".");
+        } else {
+            log_.message(aoap::Severity::warning,
+                         "Screen size not detected. " + result.size_error);
         }
-        awaiting_connect_rescan_ = true;
         engine_.refresh();
     }
     if (ready(retry_task_)) {
@@ -274,46 +292,8 @@ void App::load_script(const std::string& path) {
     cursor_ = {};
 }
 
-void App::begin_connect() {
-    if (connect_prep_task_.valid() || retry_task_.valid() || engine_.phase() != Phase::idle)
-        return;
-    connect_error_.clear();
-    const bool skip_adb = recording();
-    if (skip_adb)
-        log_.message(aoap::Severity::info,
-                     "The adb server is left running because a recording is in progress.");
-    connect_prep_task_ =
-        std::async(std::launch::async, [serial = adb_serial(), skip_adb, wake = wake_] {
-            ConnectPrep result;
-            if (skip_adb) {
-                result.skipped = true;
-                wake();
-                return result;
-            }
-            std::string error;
-            if (aoap::adb_start_server(error))
-                result.status = AdbStatus::running;
-            else
-                result.status = aoap::adb_missing(error) ? AdbStatus::not_found
-                                                          : AdbStatus::unknown;
-            result.size_ok =
-                aoap::adb_screen_size(serial, result.width, result.height, result.size_error);
-            std::string stop_error;
-            if (aoap::adb_kill_server(stop_error)) {
-                if (result.status != AdbStatus::not_found)
-                    result.status = AdbStatus::stopped;
-                // Gives the OS a moment to actually release the USB
-                // interface before the AOA handshake reaches for it.
-                aoap::Timing::sleep_ms(1200);
-            } else if (aoap::adb_missing(stop_error)) {
-                result.status = AdbStatus::not_found;
-            }
-            wake();
-            return result;
-        });
-}
-
 void App::connect() {
+    connect_error_.clear();
     std::vector<size_t> selection;
     for (size_t index = 0; index < devices_.size(); ++index) {
         if (selected_.count(devices_[index].key) != 0)
@@ -334,7 +314,7 @@ void App::connect() {
 }
 
 void App::retry() {
-    if (connect_prep_task_.valid() || retry_task_.valid() || engine_.phase() != Phase::idle)
+    if (startup_prep_task_.valid() || retry_task_.valid() || engine_.phase() != Phase::idle)
         return;
     connect_error_.clear();
     const bool skip_adb = recording();
@@ -345,11 +325,13 @@ void App::retry() {
         RetryPrep result;
         if (!skip_adb) {
             std::string error;
-            if (aoap::adb_kill_server(error))
+            if (aoap::adb_kill_server(error)) {
                 result.status = AdbStatus::stopped;
-            else
+                aoap::Timing::sleep_ms(800);
+            } else {
                 result.status =
                     aoap::adb_missing(error) ? AdbStatus::not_found : AdbStatus::unknown;
+            }
         } else {
             result.skipped = true;
         }
@@ -818,8 +800,8 @@ void App::draw_header() {
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (size - pill_height) * 0.5f);
     ui::align_right(width);
     ui::pill(adb_label, adb_dot);
-    ImGui::SetItemTooltip("Whether the adb server is running. Connect and Retry manage it "
-                          "automatically.");
+    ImGui::SetItemTooltip("Whether the adb server is running. The startup read and the Devices "
+                          "card's refresh button manage it automatically.");
     ImGui::SameLine(0, spacing);
     if (recording()) {
         ui::pill("Recording", theme::danger, true);
@@ -855,7 +837,7 @@ void App::draw_devices_card() {
     if (phase == Phase::refreshing || retry_task_.valid()) {
         ui::spinner(button * 0.4f, theme::accent);
     } else {
-        ImGui::BeginDisabled(phase != Phase::idle || connect_prep_task_.valid());
+        ImGui::BeginDisabled(phase != Phase::idle || startup_prep_task_.valid());
         if (ui::icon_button("##refresh_devices", ui::Icon::refresh, button, ui::Tone::quiet,
                             "Kill the adb server and search for AOA-capable devices again"))
             retry();
@@ -1022,8 +1004,8 @@ void App::draw_touch_settings() {
     ImGui::SetNextItemWidth(number);
     if (ImGui::InputInt("##height", &touch_height_, 0, 0))
         touch_height_ = std::clamp(touch_height_, 1, 65536);
-    ImGui::SetItemTooltip("Connect reads this with adb (wm size) automatically. An override "
-                          "size wins; type here to set it by hand instead.");
+    ImGui::SetItemTooltip("Read automatically at startup with adb (wm size). An override size "
+                          "wins; type here to set it by hand instead.");
 
     field("Contacts");
     ui::slider_int("##contacts", &touch_contacts_, 1, 16, " fingers");
@@ -1131,16 +1113,10 @@ void App::draw_connect_card() {
     const ImVec2 size(-FLT_MIN, ImGui::GetFrameHeight() + px(14));
     switch (phase) {
     case Phase::idle:
-        if (connect_prep_task_.valid()) {
-            ImGui::BeginDisabled();
-            ui::button("Connecting...##busy", size, ui::Tone::primary);
-            ImGui::EndDisabled();
-        } else {
-            ImGui::BeginDisabled(retry_task_.valid());
-            if (ui::button("Connect", size, ui::Tone::primary))
-                begin_connect();
-            ImGui::EndDisabled();
-        }
+        ImGui::BeginDisabled(startup_prep_task_.valid() || retry_task_.valid());
+        if (ui::button("Connect", size, ui::Tone::primary))
+            connect();
+        ImGui::EndDisabled();
         break;
     case Phase::connected:
     case Phase::playing:
