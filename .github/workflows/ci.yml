@@ -1,0 +1,148 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AOAHID_REPOSITORY: paasann210/Libaoa_hid
+  AOAHID_TAG: latest
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            preset: linux-release
+            platform: linux
+            aoahid_asset: libaoahid-*-linux-x86_64-ubuntu22.04-shared.tar.gz
+          - os: windows-2022
+            preset: windows-release
+            platform: windows
+            aoahid_asset: libaoahid-*-windows-x86_64-shared.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools and GUI dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ninja-build pkg-config \
+            libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev libxext-dev xvfb libgl1-mesa-dri libegl1
+
+      - name: Download libaoahid release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AOAHID_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dependencies
+          if [ "$AOAHID_TAG" = "latest" ]; then
+            tag="$(gh release view --repo "$AOAHID_REPOSITORY" --json tagName --jq .tagName)"
+            echo "resolved latest libaoahid release: $tag"
+          else
+            tag="$AOAHID_TAG"
+          fi
+          if ! gh release download "$tag" \
+                 --repo "$AOAHID_REPOSITORY" \
+                 --pattern '${{ matrix.aoahid_asset }}' \
+                 --pattern 'SHA256SUMS' \
+                 --dir dependencies; then
+            echo "::error::Could not download '${{ matrix.aoahid_asset }}' from ${AOAHID_REPOSITORY}@${tag}."
+            exit 1
+          fi
+
+          cd dependencies
+          if [ -f SHA256SUMS ]; then
+            grep -F "$(ls libaoahid-*-shared.*)" SHA256SUMS | sha256sum -c -
+          else
+            echo "::error::SHA256SUMS is missing from the libaoahid release."
+            exit 1
+          fi
+          shopt -s nullglob
+          archives=(${{ matrix.aoahid_asset }})
+          shopt -u nullglob
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one matching asset, found ${#archives[@]}."
+            exit 1
+          fi
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            tar -xzf "${archives[0]}"
+          else
+            unzip -q "${archives[0]}"
+          fi
+
+          base="${archives[0]%.tar.gz}"
+          base="${base%.zip}"
+          if [ ! -f "$base/lib/cmake/aoahid/aoahid-config.cmake" ]; then
+            echo "::error::$base does not look like a libaoahid CMake package."
+            exit 1
+          fi
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            prefix="$(cygpath -m "$PWD/$base")"
+          else
+            prefix="$PWD/$base"
+          fi
+          echo "AOAHID_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "using libaoahid from $prefix"
+
+      - name: Configure
+        shell: bash
+        run: cmake --preset ${{ matrix.preset }} -DCMAKE_PREFIX_PATH="$AOAHID_PREFIX"
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Run unit tests
+        run: ctest --test-dir build/${{ matrix.preset }} --output-on-failure -C Release
+
+      - name: Smoke test the binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Every program lands in out/<config>, next to csv/ and (on Windows)
+          # the libaoahid DLLs the build stages there.
+          out=build/${{ matrix.preset }}/out/Release
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            exe=""
+          else
+            exe=".exe"
+          fi
+          "$out/aoa_touch$exe" --help > /dev/null
+          "$out/aoa_record$exe" --help > /dev/null
+          test -f "$out/aoahid_player_gui$exe"
+          test -f "$out/csv/example.csv"
+          # A malformed script must be rejected with a file:line diagnostic
+          # before any USB work.
+          printf 't,0,1,500\n' > broken.csv
+          if "$out/aoa_touch$exe" --touch-res 1080x1920 --touch-max-contacts 10 \
+               --devices all broken.csv 2> out.txt; then
+            echo "::error::a malformed script was accepted"; exit 1
+          fi
+          grep -q "broken.csv:1" out.txt
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            # The GUI must start and keep running; 124 means timeout stopped it.
+            set +e
+            timeout 5 xvfb-run -a "$out/aoahid_player_gui"
+            status=$?
+            set -e
+            if [ "$status" -ne 124 ]; then
+              echo "::error::aoahid_player_gui exited early with status $status"
+              exit 1
+            fi
+          fi
