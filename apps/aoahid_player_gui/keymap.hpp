@@ -34,4 +34,11 @@ const char* hid_usage_name(uint16_t usage) noexcept;
 // with no GLFW_KEY_* of its own).
 const char* glfw_key_name(int key) noexcept;
 
+// HID usage (and whether Left Shift must be held) for one ASCII character of
+// pasted clipboard text: letters, digits, the printable symbols a US layout
+// types unshifted or shifted, space, tab, and newline (mapped to Enter).
+// Returns false for anything else, including every non-ASCII character, so
+// the caller can skip it.
+bool hid_usage_from_ascii(char c, uint16_t& usage, bool& shift) noexcept;
+
 } // namespace gui

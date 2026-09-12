@@ -209,4 +209,60 @@ const char* glfw_key_name(const int key) noexcept {
     return text;
 }
 
+bool hid_usage_from_ascii(const char c, uint16_t& usage, bool& shift) noexcept {
+    shift = false;
+    if (c >= 'a' && c <= 'z') {
+        usage = static_cast<uint16_t>(0x04 + (c - 'a'));
+        return true;
+    }
+    if (c >= 'A' && c <= 'Z') {
+        usage = static_cast<uint16_t>(0x04 + (c - 'A'));
+        shift = true;
+        return true;
+    }
+    if (c >= '1' && c <= '9') {
+        usage = static_cast<uint16_t>(0x1E + (c - '1'));
+        return true;
+    }
+    switch (c) {
+    case '0': usage = 0x27; return true;
+    case '\n': usage = 0x28; return true; // Enter
+    case '\t': usage = 0x2B; return true;
+    case ' ': usage = 0x2C; return true;
+    case '-': usage = 0x2D; return true;
+    case '_': usage = 0x2D; shift = true; return true;
+    case '=': usage = 0x2E; return true;
+    case '+': usage = 0x2E; shift = true; return true;
+    case '[': usage = 0x2F; return true;
+    case '{': usage = 0x2F; shift = true; return true;
+    case ']': usage = 0x30; return true;
+    case '}': usage = 0x30; shift = true; return true;
+    case '\\': usage = 0x31; return true;
+    case '|': usage = 0x31; shift = true; return true;
+    case ';': usage = 0x33; return true;
+    case ':': usage = 0x33; shift = true; return true;
+    case '\'': usage = 0x34; return true;
+    case '"': usage = 0x34; shift = true; return true;
+    case '`': usage = 0x35; return true;
+    case '~': usage = 0x35; shift = true; return true;
+    case ',': usage = 0x36; return true;
+    case '<': usage = 0x36; shift = true; return true;
+    case '.': usage = 0x37; return true;
+    case '>': usage = 0x37; shift = true; return true;
+    case '/': usage = 0x38; return true;
+    case '?': usage = 0x38; shift = true; return true;
+    case '!': usage = 0x1E; shift = true; return true; // Shift+1
+    case '@': usage = 0x1F; shift = true; return true; // Shift+2
+    case '#': usage = 0x20; shift = true; return true; // Shift+3
+    case '$': usage = 0x21; shift = true; return true; // Shift+4
+    case '%': usage = 0x22; shift = true; return true; // Shift+5
+    case '^': usage = 0x23; shift = true; return true; // Shift+6
+    case '&': usage = 0x24; shift = true; return true; // Shift+7
+    case '*': usage = 0x25; shift = true; return true; // Shift+8
+    case '(': usage = 0x26; shift = true; return true; // Shift+9
+    case ')': usage = 0x27; shift = true; return true; // Shift+0
+    default: return false;
+    }
+}
+
 } // namespace gui

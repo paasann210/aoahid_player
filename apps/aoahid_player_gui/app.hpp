@@ -47,6 +47,9 @@ class App {
     // Ctrl+F, taken from the window system with the modifier state of that
     // exact key press, so even a chord sent in one burst is recognised.
     void on_search_shortcut();
+    // Ctrl+Shift+V on the Live tab: types the clipboard's text on the phone
+    // as keystrokes. Same effect as the "Paste Text" button.
+    void on_paste_shortcut();
     // Raw key presses from the window system, so live control can forward
     // keys ImGui reserves for itself (Tab, Escape, Space). `scancode` is the
     // platform scancode GLFW hands the key callback, used to recognise JIS
@@ -172,6 +175,10 @@ class App {
     [[nodiscard]] float live_preview_aspect() const noexcept;
     void live_keyboard();
     void live_gamepad();
+    // Reads the clipboard and types it on the phone; no-op if a paste is
+    // already running, the clipboard has no text, or Keyboard live control
+    // is not on.
+    void live_paste_clipboard();
     void drain_observed();
     void live_log(std::string text, ImU32 color);
     [[nodiscard]] bool live_ready() const;
@@ -311,6 +318,10 @@ class App {
     double live_raw_delta_y_{};
     LiveImageOverlay live_image_;      // optional reference picture over the preview
     std::string live_image_path_input_;
+    // Clipboard paste: types characters on a worker thread so the ~8ms
+    // per-character pacing (see live_paste_clipboard()) never blocks the UI.
+    std::thread live_paste_thread_;
+    std::atomic<bool> live_paste_active_{};
 
     // Playlist.
     std::vector<std::string> playlist_names_;

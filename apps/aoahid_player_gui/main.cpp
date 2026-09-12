@@ -106,6 +106,11 @@ void on_key(GLFWwindow*, const int key, const int scancode, const int action, co
         g_app->on_search_shortcut();
         return;
     }
+    if (action == GLFW_PRESS && key == GLFW_KEY_V &&
+        (mods & (GLFW_MOD_CONTROL | GLFW_MOD_SHIFT)) == (GLFW_MOD_CONTROL | GLFW_MOD_SHIFT)) {
+        g_app->on_paste_shortcut();
+        return;
+    }
     if (action != GLFW_REPEAT)
         g_app->on_key(key, scancode, action == GLFW_PRESS);
 }

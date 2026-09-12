@@ -77,6 +77,8 @@ App::~App() {
     live_capture_pointer(false);
     persist_settings();
     stop_recording();
+    if (live_paste_thread_.joinable())
+        live_paste_thread_.join();
     if (record_thread_.joinable())
         record_thread_.join();
 }
@@ -617,6 +619,11 @@ void App::on_search_shortcut() {
         return;
     tab_ = Tab::player;
     open_picker_ = true;
+}
+
+void App::on_paste_shortcut() {
+    if (tab_ == Tab::live)
+        live_paste_clipboard();
 }
 
 // --- Frame -----------------------------------------------------------------

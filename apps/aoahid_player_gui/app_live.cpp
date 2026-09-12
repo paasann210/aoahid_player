@@ -346,6 +346,48 @@ void App::live_keyboard() {
     pressed_keys_.clear();
 }
 
+void App::live_paste_clipboard() {
+    if (engine_.phase() != Phase::live || !live_.key)
+        return;
+    if (!engine_.connected_setup().key.enabled)
+        return;
+    if (live_paste_active_.load(std::memory_order_relaxed))
+        return;
+    const char* clipboard = ImGui::GetClipboardText();
+    if (clipboard == nullptr || clipboard[0] == '\0') {
+        live_log("Clipboard is empty.", theme::text_dim);
+        return;
+    }
+
+    if (live_paste_thread_.joinable())
+        live_paste_thread_.join();
+    live_paste_active_.store(true, std::memory_order_relaxed);
+    live_paste_thread_ = std::thread([this, text = std::string(clipboard)] {
+        // Half of the ~8ms per-character budget on either side of the report
+        // change, so Down and Up always land in separate reports instead of
+        // cancelling out in the same one — Android drops the keystroke
+        // otherwise. Left Shift rides along with the key itself so a
+        // shifted character is still one physical-feeling press.
+        constexpr int32_t step_delay_ms = 4;
+        constexpr uint16_t left_shift = 0xE1;
+        for (const char c : text) {
+            uint16_t usage = 0;
+            bool shift = false;
+            if (!hid_usage_from_ascii(c, usage, shift))
+                continue; // unsupported, including all non-ASCII — skipped
+            if (shift)
+                engine_.live_send(aoap::KeyEvent{left_shift, true});
+            engine_.live_send(aoap::KeyEvent{usage, true});
+            aoap::Timing::sleep_ms(step_delay_ms);
+            engine_.live_send(aoap::KeyEvent{usage, false});
+            if (shift)
+                engine_.live_send(aoap::KeyEvent{left_shift, false});
+            aoap::Timing::sleep_ms(step_delay_ms);
+        }
+        live_paste_active_.store(false, std::memory_order_relaxed);
+    });
+}
+
 void App::live_gamepad() {
     if (engine_.phase() != Phase::live || !live_.gamepad)
         return;
@@ -896,6 +938,19 @@ void App::draw_live_controls() {
     }
     ImGui::EndDisabled();
     ImGui::SetItemTooltip("Back to the connected screen's ratio, upright.");
+
+    // Types the clipboard's text on the phone as keystrokes; same trigger as
+    // Ctrl+Shift+V.
+    gap(2);
+    const bool paste_ready = running && live_.key && setup.key.enabled;
+    ImGui::BeginDisabled(!paste_ready || live_paste_active_.load(std::memory_order_relaxed));
+    if (ui::button("Paste Text", ImVec2(px(110), 0)))
+        live_paste_clipboard();
+    ImGui::EndDisabled();
+    if (!paste_ready && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Turn on Live control and Keyboard to paste.");
+    else
+        ImGui::SetItemTooltip("Types the clipboard's text on the phone. Ctrl+Shift+V");
 
     // Reference image: an optional picture over the preview (a screenshot
     // works well) to line touches up against, not saved between runs.
