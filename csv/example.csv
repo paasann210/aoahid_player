@@ -1,0 +1,25 @@
+# aoahid-player example script
+# Uppercase prefix = runs once on the first loop iteration only.
+# Lowercase prefix = runs on every loop iteration.
+
+# --- one-time setup, before the loop body ---
+K,0x04,1,8
+K,0x04,0,8
+
+# --- repeated every loop ---
+t,0,1,500,500,16
+t,0,0,600,650,16
+
+m,10,-5,8
+b,1,1,0
+b,1,0,16
+
+g,1,1,0
+g,1,0,16
+a,0,32767,0
+a,0,0,0
+h,1,0,1,0,16
+h,0,0,0,0,16
+
+p,1,1,500,500,200,16
+p,0,0,500,500,0,16

@@ -1,0 +1,290 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Lets the whole release be rehearsed without publishing anything.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and package, but do not publish a Release"
+        type: boolean
+        default: true
+      version:
+        description: "Version string for the archive names (dry runs only)"
+        type: string
+        default: "v0.0.0-dryrun"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Binaries link libaoahid from its own GitHub Release. Pin the tag so a
+  # tagged aoahid-player build stays reproducible; "latest" would silently
+  # change what the released binaries link against.
+  AOAHID_REPOSITORY: paasann210/Libaoa_hid
+  AOAHID_TAG: latest
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu-22.04 matches the glibc baseline libaoahid's Linux assets
+          # are built against; a newer runner would raise the requirement.
+          - os: ubuntu-22.04
+            preset: linux-release
+            archive_ext: tar.gz
+            platform: linux
+            arch: x86_64
+            aoahid_asset: libaoahid-*-linux-x86_64-ubuntu22.04-shared.tar.gz
+          # Pinned, not windows-latest: CMakePresets.json fixes the generator
+          # to "Visual Studio 17 2022", so the runner image must still ship it.
+          - os: windows-2022
+            preset: windows-release
+            archive_ext: zip
+            platform: windows
+            arch: x86_64
+            aoahid_asset: libaoahid-*-windows-x86_64-shared.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools and GUI dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          # GLFW needs the X11 and Wayland headers (it loads both at run
+          # time); xvfb and Mesa let the GUI be started once as a smoke test.
+          sudo apt-get install --no-install-recommends -y ninja-build patchelf pkg-config \
+            libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev libxext-dev xvfb libgl1-mesa-dri libegl1
+
+      - name: Resolve the release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${{ github.ref_name }}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download libaoahid release asset
+        shell: bash
+        env:
+          # A fine-grained PAT with read access is only needed when the
+          # dependency repository is private; the job token covers public ones.
+          GH_TOKEN: ${{ secrets.AOAHID_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dependencies
+          if [ "$AOAHID_TAG" = "latest" ]; then
+            tag="$(gh release view --repo "$AOAHID_REPOSITORY" --json tagName --jq .tagName)"
+            echo "resolved latest libaoahid release: $tag"
+          else
+            tag="$AOAHID_TAG"
+          fi
+          if ! gh release download "$tag" \
+                 --repo "$AOAHID_REPOSITORY" \
+                 --pattern '${{ matrix.aoahid_asset }}' \
+                 --pattern 'SHA256SUMS' \
+                 --dir dependencies; then
+            echo "::error::Could not download '${{ matrix.aoahid_asset }}' from ${AOAHID_REPOSITORY}@${tag}."
+            echo "::error::Check that the release exists and carries that asset. If the repository is private, add an AOAHID_TOKEN secret with read access."
+            exit 1
+          fi
+
+          cd dependencies
+          # The release publishes SHA256SUMS; verifying it is what makes the
+          # downloaded runtime trustworthy.
+          if [ -f SHA256SUMS ]; then
+            grep -F "$(ls libaoahid-*-shared.*)" SHA256SUMS | sha256sum -c -
+          else
+            echo "::error::SHA256SUMS is missing from the libaoahid release."
+            exit 1
+          fi
+          shopt -s nullglob
+          archives=(${{ matrix.aoahid_asset }})
+          shopt -u nullglob
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one matching asset, found ${#archives[@]}."
+            exit 1
+          fi
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            tar -xzf "${archives[0]}"
+          else
+            unzip -q "${archives[0]}"
+          fi
+
+          # The archive expands to one directory named after the asset.
+          base="${archives[0]%.tar.gz}"
+          base="${base%.zip}"
+          if [ ! -f "$base/lib/cmake/aoahid/aoahid-config.cmake" ]; then
+            echo "::error::$base does not look like a libaoahid CMake package."
+            exit 1
+          fi
+          # CMake for MSVC cannot read the MSYS-style path bash reports here,
+          # so the Windows prefix is converted back to a drive-letter path.
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            prefix="$(cygpath -m "$PWD/$base")"
+          else
+            prefix="$PWD/$base"
+          fi
+          echo "AOAHID_PREFIX=$prefix" >> "$GITHUB_ENV"
+          echo "using libaoahid from $prefix"
+
+      - name: Configure
+        shell: bash
+        run: cmake --preset ${{ matrix.preset }} -DCMAKE_PREFIX_PATH="$AOAHID_PREFIX"
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="aoahid-player-${{ steps.version.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}"
+          stage="$PWD/stage/$name"
+          rm -rf "$stage"
+          # The runtime component is exactly the archive: every program next
+          # to csv/, the libaoahid and libusb runtimes, the MSVC runtime on
+          # Windows, README/LICENSE, and third-party notices.
+          cmake --install build/${{ matrix.preset }} --config Release --component runtime \
+            --prefix "$stage"
+          echo "stage=$stage" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            exe=""
+            # libaoahid must find the libusb shipped beside it, not the system one.
+            for lib in "$stage"/libaoahid.so.*; do
+              [ -L "$lib" ] && continue
+              if ! readelf -d "$lib" | grep -E '(RPATH|RUNPATH)' | grep -qF '[$ORIGIN]'; then
+                patchelf --set-rpath '$ORIGIN' "$lib"
+              fi
+            done
+          else
+            exe=".exe"
+          fi
+
+          missing=0
+          for required in "aoa_touch$exe" "aoa_record$exe" "aoahid_player_gui$exe" \
+                          README.md LICENSE csv/example.csv \
+                          third-party/LICENSE third-party/NOTICE third-party/THIRD_PARTY_NOTICES.md \
+                          third-party/DearImGui-LICENSE.txt third-party/GLFW-LICENSE.md \
+                          third-party/Roboto-LICENSE.txt; do
+            if [ ! -e "$stage/$required" ]; then
+              echo "::error::$required is missing from the package."
+              missing=1
+            fi
+          done
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            ls "$stage"/libaoahid.so.* "$stage"/libusb-1.0.so.* > /dev/null || missing=1
+            # libusb is LGPL-2.1-or-later and ships inside this archive, so
+            # its corresponding source must travel with it.
+            ls "$stage"/third-party/third-party/source/libusb-*.tar.* > /dev/null || missing=1
+          else
+            # Windows DLLs have no "lib" prefix (aoahid.dll, not
+            # libaoahid.dll) unlike the Linux .so above.
+            ls "$stage"/aoahid*.dll > /dev/null || missing=1
+            # libaoahid links libusb (LGPL-2.1-or-later) on Windows too; its
+            # DLL and matching source archive must travel with this archive,
+            # the same as the Linux .so and source checks above.
+            ls "$stage"/*usb*.dll > /dev/null || {
+              echo "::error::the libusb DLL was not bundled."; missing=1; }
+            ls "$stage"/third-party/third-party/source/libusb-*.tar.* > /dev/null || {
+              echo "::error::the libusb source archive was not bundled."; missing=1; }
+            # The app-local MSVC runtime libaoahid.dll and the programs need.
+            for dll in vcruntime140.dll msvcp140.dll; do
+              [ -f "$stage/$dll" ] || { echo "::error::$dll was not bundled."; missing=1; }
+            done
+          fi
+          [ "$missing" -eq 0 ]
+          find "$stage" -maxdepth 1 | sort
+
+      - name: Smoke test the packaged programs
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="${{ steps.package.outputs.stage }}"
+          cd "$stage"
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            # Run from the package itself: $ORIGIN must be enough.
+            ./aoa_touch --help > /dev/null
+            ./aoa_record --help > /dev/null
+            printf 't,0,1,500\n' > /tmp/broken.csv
+            if ./aoa_touch --touch-res 1080x1920 --touch-max-contacts 10 --devices all \
+                 /tmp/broken.csv 2> /tmp/out.txt; then
+              echo "::error::a malformed script was accepted"; exit 1
+            fi
+            grep -q "broken.csv:1" /tmp/out.txt
+            # The GUI must start and keep running; 124 means timeout stopped it.
+            set +e
+            timeout 5 xvfb-run -a ./aoahid_player_gui
+            status=$?
+            set -e
+            if [ "$status" -ne 124 ]; then
+              echo "::error::aoahid_player_gui exited early with status $status"
+              exit 1
+            fi
+          else
+            ./aoa_touch.exe --help > /dev/null
+            ./aoa_record.exe --help > /dev/null
+          fi
+          echo "packaged programs start correctly"
+
+      - name: Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="${{ steps.package.outputs.name }}"
+          cd stage
+          if [ "${{ matrix.archive_ext }}" = "tar.gz" ]; then
+            # tar keeps the executable bits and the .so version symlinks.
+            tar -czf "../$name.tar.gz" "$name"
+          else
+            cmake -E tar cf "../$name.zip" --format=zip "$name"
+          fi
+          cd ..
+          ls -l "$name.${{ matrix.archive_ext }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aoahid-player-${{ matrix.platform }}-${{ matrix.arch }}
+          path: aoahid-player-*.${{ matrix.archive_ext }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    # A dry run stops here: everything is built and packaged, nothing is published.
+    if: github.ref_type == 'tag' && inputs.dry_run != true
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: List what will be published
+        run: ls -l dist
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/aoahid-player-*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

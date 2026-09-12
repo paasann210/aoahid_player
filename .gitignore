@@ -1,0 +1,25 @@
+# Build outputs
+build/
+stage/
+dependencies/
+*.o
+*.obj
+*.exe
+.cache/
+CMakeUserPresets.json
+
+# GUI settings written next to the program
+aoahid_player_gui.ini
+playlists/
+
+# Release archives made locally
+aoahid-player-*.tar.gz
+aoahid-player-*.zip
+
+# IDE / editor / OS
+.vscode/
+.vs/
+.idea/
+*.user
+.DS_Store
+Thumbs.db

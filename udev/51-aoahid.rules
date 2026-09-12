@@ -1,0 +1,36 @@
+# udev rules for aoahid-player / libaoahid.
+#
+# On Linux, USB devices are only writable by root unless a rule like this
+# grants access to a group. Without it, aoa_touch/aoa_record fail to open
+# the device even though `adb` can see it fine (adb goes through the
+# separate, already-configured android_usb udev rule/adbd, not raw USB).
+#
+# Install:
+#   sudo cp udev/51-aoahid.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#   # then unplug and replug the device
+#
+# The `plugdev` group is used by convention on Debian/Ubuntu; add your user
+# to it with `sudo usermod -aG plugdev $USER` (log out/in to take effect).
+# On distributions without plugdev, change GROUP below to a group you are
+# already in, or use TAG+="uaccess" instead (systemd-managed dynamic ACLs,
+# no group needed on most modern distros).
+
+# Google's accessory-mode vendor ID (0x18d1) with the standard AOA 2.0
+# product ID range (0x2d00-0x2d05: accessory, accessory+adb, audio,
+# audio+adb, accessory+audio, accessory+audio+adb). This is what the phone
+# enumerates as *after* aoahid has switched it into accessory mode.
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d0[0-5]", MODE="0666", GROUP="plugdev", TAG+="uaccess"
+
+# Before the switch, the device still enumerates under its own manufacturer
+# vendor ID (Samsung, Google Pixel, etc.), which aoahid also needs to probe
+# with the AOA handshake. That ID varies per phone, so it isn't listed here;
+# add a line for your own device's vendor ID, e.g.:
+#
+#   SUBSYSTEM=="usb", ATTR{idVendor}=="04e8", MODE="0666", GROUP="plugdev", TAG+="uaccess"
+#
+# `lsusb` (with the device plugged in, before running aoa_touch) shows the
+# vendor ID to use. For a maintained list covering most Android
+# manufacturers, see the community android-udev-rules project:
+# https://github.com/M0Rf30/android-udev-rules
